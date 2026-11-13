@@ -7,15 +7,9 @@
  * Needs:  npm i lucide-react recharts react-hot-toast
  * Drop in: app/page.tsx (Next.js App Router) — works with Tailwind v3 or v4, no config changes
  *          (dark mode + theming use CSS variables set on the root element).
- *
- * Demo logins (replace with POST /api/auth/login -> JWT later):
- *   admin@ssa.edu / admin123   teacher@ssa.edu / teacher123   student@ssa.edu / student123
- *
- * All data lives in the in-memory store below (useSchoolStore). Each action maps 1:1 to a REST
- * endpoint you can build later; the admission counter notes the atomic Mongo approach.
  */
 
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import toast, { Toaster } from "react-hot-toast";
 import {
   Activity, Award, BookOpen, Briefcase, Building2, ChevronDown, ChevronLeft, ChevronRight, ClipboardList,
@@ -41,7 +35,7 @@ const INSTITUTION = {
 const YEAR = 2026;
 const CURRENT_TERM = "Term 3";
 const VERSION = "v1.0.0";
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000/api";
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "https://st-sarah-academy-sms.onrender.com/api";
 const CURRENCY = "$";
 const FEES = { tuition: 1200, activities: 100, boarding: 800 }; // per term
 
@@ -58,7 +52,7 @@ const DUTY_PRESETS = [
 
 type Role = "admin" | "teacher" | "student";
 type Category = "Boarding" | "Day Scholar";
-interface User { id: string; name: string; email: string; password: string; role: Role; refId?: string }
+interface User { id: string; name: string; email: string; role: Role; refId?: string }
 interface Dorm { id: string; name: string; capacity: number; active: boolean }
 interface Student {
   id: string; admissionNo: string; name: string; gender: "M" | "F"; className: string;
@@ -71,6 +65,110 @@ interface LedgerEntry {
   id: string; receiptNo: string | null; studentId: string; kind: "payment" | "adjustment";
   amount: number; method: string; date: string; note: string;
 }
+
+/* ───────────────────────────── API Client ───────────────────────────── */
+
+const TOKEN_KEY = "ssa_auth_token";
+const USER_KEY = "ssa_auth_user";
+
+const getToken = () => (typeof window !== "undefined" ? localStorage.getItem(TOKEN_KEY) : null);
+const setAuthStorage = (token: string | null, user: User | null) => {
+  if (typeof window === "undefined") return;
+  if (token) localStorage.setItem(TOKEN_KEY, token);
+  else localStorage.removeItem(TOKEN_KEY);
+  if (user) localStorage.setItem(USER_KEY, JSON.stringify(user));
+  else localStorage.removeItem(USER_KEY);
+};
+
+async function apiFetch<T = any>(path: string, options: RequestInit = {}): Promise<T> {
+  const token = getToken();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...(options.headers as Record<string, string> | undefined),
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  const res = await fetch(`${API_URL}${path}`, { ...options, headers });
+  const text = await res.text();
+  let data: any = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = text;
+  }
+  if (!res.ok) {
+    const msg = (data && (data.message || data.error)) || `Request failed (${res.status})`;
+    throw new Error(msg);
+  }
+  return data as T;
+}
+
+const normId = <T extends Record<string, any>>(item: T): T & { id: string } => ({
+  ...item,
+  id: String(item.id ?? item._id ?? ""),
+});
+
+const normStudent = (s: any): Student => ({
+  ...normId(s),
+  admissionNo: s.admissionNo ?? "",
+  name: s.name ?? "",
+  gender: s.gender ?? "M",
+  className: s.className ?? CLASSES[0],
+  category: s.category ?? "Day Scholar",
+  dormId: s.dormId ? String(typeof s.dormId === "object" ? (s.dormId.id ?? s.dormId._id) : s.dormId) : null,
+  guardian: s.guardian ?? "",
+  phone: s.phone ?? "",
+});
+
+const normDorm = (d: any): Dorm => ({
+  ...normId(d),
+  name: d.name ?? "",
+  capacity: Number(d.capacity ?? 0),
+  active: d.active ?? true,
+});
+
+const normTeacher = (t: any): Teacher => ({
+  ...normId(t),
+  name: t.name ?? "",
+  email: t.email ?? "",
+  deptId: t.deptId ? String(typeof t.deptId === "object" ? (t.deptId.id ?? t.deptId._id) : t.deptId) : "",
+  subjects: Array.isArray(t.subjects) ? t.subjects : [],
+  duties: Array.isArray(t.duties) ? t.duties : [],
+});
+
+const normDept = (d: any): Dept => ({
+  ...normId(d),
+  name: d.name ?? "",
+  hodId: d.hodId ? String(typeof d.hodId === "object" ? (d.hodId.id ?? d.hodId._id) : d.hodId) : null,
+});
+
+const normMark = (m: any): Mark => ({
+  studentId: String(typeof m.studentId === "object" ? (m.studentId.id ?? m.studentId._id) : m.studentId),
+  subject: m.subject ?? "",
+  term: m.term ?? CURRENT_TERM,
+  type: m.type ?? ASSESSMENTS[0],
+  score: Number(m.score ?? 0),
+  remark: m.remark ?? "",
+});
+
+const normLedger = (l: any): LedgerEntry => ({
+  ...normId(l),
+  receiptNo: l.receiptNo ?? null,
+  studentId: String(typeof l.studentId === "object" ? (l.studentId.id ?? l.studentId._id) : l.studentId),
+  kind: l.kind ?? "payment",
+  amount: Number(l.amount ?? 0),
+  method: l.method ?? "Cash",
+  date: typeof l.date === "string" ? l.date.slice(0, 10) : todayStr(),
+  note: l.note ?? "",
+});
+
+const normUser = (u: any): User => ({
+  ...normId(u),
+  name: u.name ?? "",
+  email: u.email ?? "",
+  role: u.role ?? "student",
+  refId: u.refId ? String(typeof u.refId === "object" ? (u.refId.id ?? u.refId._id) : u.refId) : undefined,
+});
 
 /* ───────────────────────────── Helpers ───────────────────────────── */
 
@@ -118,109 +216,55 @@ function openPrintable(title: string, body: string) {
 const letterhead = () =>
   `<div class="head"><h1>${esc(INSTITUTION.name)}</h1><div class="muted">${esc(INSTITUTION.motto)}<br/>${esc(INSTITUTION.address)} · ${esc(INSTITUTION.phone)} · ${esc(INSTITUTION.email)}</div></div>`;
 
-/* ───────────────────────────── Seed data ───────────────────────────── */
+/* ───────────────────────────── Live API Store ───────────────────────────── */
 
-function mulberry(seed: number) {
-  return () => {
-    seed |= 0; seed = (seed + 0x6d2b79f5) | 0;
-    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
+function useSchoolStore(user: User | null) {
+  const [students, setStudents] = useState<Student[]>([]);
+  const [dorms, setDorms] = useState<Dorm[]>([]);
+  const [teachers, setTeachers] = useState<Teacher[]>([]);
+  const [depts, setDepts] = useState<Dept[]>([]);
+  const [marks, setMarks] = useState<Mark[]>([]);
+  const [ledger, setLedger] = useState<LedgerEntry[]>([]);
+  const [loading, setLoading] = useState(false);
 
-const SEED_DORMS: Dorm[] = [
-  { id: "d1", name: "St. Jude Hall", capacity: 6, active: true },
-  { id: "d2", name: "Grace Dormitory", capacity: 6, active: true },
-  { id: "d3", name: "St. Mary Hall", capacity: 4, active: true },
-  { id: "d4", name: "Hope House", capacity: 8, active: false },
-];
-const STUDENT_ROWS: [string, "M" | "F", string, Category, string | null][] = [
-  ["Liam Carter", "M", "Form 1A", "Boarding", "d1"],
-  ["Sophia Bennett", "F", "Form 1A", "Day Scholar", null],
-  ["Noah Mensah", "M", "Form 1B", "Boarding", "d1"],
-  ["Ava Thompson", "F", "Form 1B", "Boarding", "d2"],
-  ["Ethan Brooks", "M", "Form 2A", "Day Scholar", null],
-  ["Mia Hughes", "F", "Form 2A", "Boarding", "d2"],
-  ["Lucas Reid", "M", "Form 2A", "Boarding", "d3"],
-  ["Isabella Moore", "F", "Form 3A", "Day Scholar", null],
-  ["Oliver Grant", "M", "Form 3A", "Boarding", "d1"],
-  ["Amelia Foster", "F", "Form 3A", "Boarding", "d3"],
-  ["James Nolan", "M", "Form 1A", "Day Scholar", null],
-  ["Grace Palmer", "F", "Form 1B", "Day Scholar", null],
-];
-const SEED_STUDENTS: Student[] = STUDENT_ROWS.map(([name, gender, className, category, dormId], i) => ({
-  id: `s${i + 1}`, admissionNo: `SSA/${YEAR}/${String(i + 1).padStart(4, "0")}`,
-  name, gender, className, category, dormId, guardian: `Guardian of ${name.split(" ")[0]}`, phone: "+000 000 000 000",
-}));
-const SEED_TEACHERS: Teacher[] = [
-  { id: "t1", name: "Ms. Amara Johnson", email: "teacher@ssa.edu", deptId: "dp1", subjects: ["Mathematics"], duties: ["Examinations Officer"] },
-  { id: "t2", name: "Mr. David Clarke", email: "d.clarke@ssa.edu", deptId: "dp2", subjects: ["English"], duties: ["Patron – Drama Club"] },
-  { id: "t3", name: "Dr. Helen Parker", email: "h.parker@ssa.edu", deptId: "dp3", subjects: ["Physics", "Chemistry", "Biology"], duties: ["Sports Master"] },
-  { id: "t4", name: "Mr. Samuel Rivers", email: "s.rivers@ssa.edu", deptId: "dp4", subjects: ["History", "Geography"], duties: [] },
-];
-const SEED_DEPTS: Dept[] = [
-  { id: "dp1", name: "Mathematics", hodId: "t1" },
-  { id: "dp2", name: "Languages", hodId: "t2" },
-  { id: "dp3", name: "Sciences", hodId: "t3" },
-  { id: "dp4", name: "Humanities", hodId: null },
-];
-const SEED_USERS: User[] = [
-  { id: "u1", name: "Principal Admin", email: "admin@ssa.edu", password: "admin123", role: "admin" },
-  { id: "u2", name: "Ms. Amara Johnson", email: "teacher@ssa.edu", password: "teacher123", role: "teacher", refId: "t1" },
-  { id: "u3", name: "Liam Carter", email: "student@ssa.edu", password: "student123", role: "student", refId: "s1" },
-];
-const SEED_MARKS: Mark[] = (() => {
-  const rnd = mulberry(2026);
-  const out: Mark[] = [];
-  SEED_STUDENTS.forEach((s) => {
-    const ability = 45 + rnd() * 40;
-    SUBJECTS.forEach((sub) => {
-      const subj = ability + (rnd() - 0.5) * 24;
-      TERMS.forEach((term) => {
-        const types = term === "Term 3" ? ["Test 1"] : ["Test 1", "Midterm", "End of Term"];
-        types.forEach((type) => {
-          const score = Math.max(8, Math.min(98, Math.round(subj + (rnd() - 0.5) * 14)));
-          out.push({ studentId: s.id, subject: sub, term, type, score, remark: remarkOf(score) });
-        });
-      });
-    });
-  });
-  return out;
-})();
-const SEED_LEDGER: LedgerEntry[] = (() => {
-  const rnd = mulberry(7);
-  const out: LedgerEntry[] = [];
-  let n = 0;
-  SEED_STUDENTS.forEach((s, i) => {
-    const total = FEES.tuition + FEES.activities + (s.category === "Boarding" ? FEES.boarding : 0);
-    const share = i === 0 ? 0.45 : [0.4, 0.7, 1, 1, 0.55][Math.floor(rnd() * 5)];
-    const amt = Math.round((total * share) / 50) * 50;
-    if (amt > 0) {
-      n++;
-      out.push({
-        id: `l${n}`, receiptNo: `RCT-${String(n).padStart(4, "0")}`, studentId: s.id, kind: "payment",
-        amount: amt, method: ["Cash", "Bank Transfer", "Mobile Money"][i % 3],
-        date: `2026-0${(i % 3) + 8}-${String(5 + i).padStart(2, "0")}`, note: "Term fees",
-      });
+  const refreshAll = useCallback(async () => {
+    if (!user) return;
+    setLoading(true);
+    try {
+      const [sRes, dRes, tRes, dpRes, mRes, lRes] = await Promise.all([
+        apiFetch<any>("/students").catch(() => []),
+        apiFetch<any>("/dorms").catch(() => []),
+        apiFetch<any>("/teachers").catch(() => []),
+        apiFetch<any>("/departments").catch(() => []),
+        apiFetch<any>("/marks").catch(() => []),
+        apiFetch<any>("/ledger").catch(() => []),
+      ]);
+      const extract = (r: any) => (Array.isArray(r) ? r : Array.isArray(r?.data) ? r.data : []);
+      setStudents(extract(sRes).map(normStudent));
+      setDorms(extract(dRes).map(normDorm));
+      setTeachers(extract(tRes).map(normTeacher));
+      setDepts(extract(dpRes).map(normDept));
+      setMarks(extract(mRes).map(normMark));
+      setLedger(extract(lRes).map(normLedger));
+    } catch (err: any) {
+      toast.error(err?.message || "Failed to load school data from server.");
+    } finally {
+      setLoading(false);
     }
-  });
-  return out;
-})();
+  }, [user]);
 
-/* ───────────────────────────── Store (swap for API calls later) ───────────────────────────── */
-
-function useSchoolStore() {
-  const [students, setStudents] = useState<Student[]>(SEED_STUDENTS);
-  const [dorms, setDorms] = useState<Dorm[]>(SEED_DORMS);
-  const [teachers, setTeachers] = useState<Teacher[]>(SEED_TEACHERS);
-  const [depts, setDepts] = useState<Dept[]>(SEED_DEPTS);
-  const [marks, setMarks] = useState<Mark[]>(SEED_MARKS);
-  const [ledger, setLedger] = useState<LedgerEntry[]>(SEED_LEDGER);
-  // Server equivalent: Counter.findOneAndUpdate({_id:`admission-${YEAR}`},{$inc:{seq:1}},{upsert:true,new:true})
-  // — a single atomic Mongo op, so concurrent registrations can never receive the same number.
-  const seq = useRef(SEED_STUDENTS.length);
-  const rct = useRef(SEED_LEDGER.length);
+  useEffect(() => {
+    if (user) {
+      refreshAll();
+    } else {
+      setStudents([]);
+      setDorms([]);
+      setTeachers([]);
+      setDepts([]);
+      setMarks([]);
+      setLedger([]);
+    }
+  }, [user, refreshAll]);
 
   const occ = useCallback((dormId: string) => students.filter((s) => s.dormId === dormId).length, [students]);
 
@@ -238,44 +282,81 @@ function useSchoolStore() {
     [dorms, students],
   );
 
-  const addStudent = (input: Omit<Student, "id" | "admissionNo">): Student => {
-    seq.current += 1;
-    const s: Student = {
-      ...input, dormId: input.category === "Boarding" ? input.dormId : null,
-      id: `s${Date.now()}${seq.current}`, admissionNo: `SSA/${YEAR}/${String(seq.current).padStart(4, "0")}`,
-    };
-    setStudents((p) => [...p, s]);
-    return s;
+  const addStudent = async (input: Omit<Student, "id" | "admissionNo">): Promise<Student> => {
+    const payload = { ...input, dormId: input.category === "Boarding" ? input.dormId : null };
+    const res = await apiFetch<any>("/students", { method: "POST", body: JSON.stringify(payload) });
+    const created = normStudent(res?.data ?? res);
+    setStudents((p) => [...p, created]);
+    return created;
   };
-  const updateStudent = (id: string, patch: Partial<Student>) =>
-    setStudents((p) => p.map((s) => {
-      if (s.id !== id) return s;
-      const n = { ...s, ...patch };
-      if (n.category === "Day Scholar") n.dormId = null;
-      return n;
-    }));
-  const deleteStudent = (id: string) => {
+
+  const updateStudent = async (id: string, patch: Partial<Student>) => {
+    const payload = { ...patch };
+    if (payload.category === "Day Scholar") payload.dormId = null;
+    const res = await apiFetch<any>(`/students/${id}`, { method: "PUT", body: JSON.stringify(payload) });
+    const updated = normStudent(res?.data ?? res);
+    setStudents((p) => p.map((s) => (s.id === id ? updated : s)));
+  };
+
+  const deleteStudent = async (id: string) => {
+    await apiFetch(`/students/${id}`, { method: "DELETE" });
     setStudents((p) => p.filter((s) => s.id !== id));
     setMarks((p) => p.filter((m) => m.studentId !== id));
     setLedger((p) => p.filter((l) => l.studentId !== id));
   };
 
-  const saveDorm = (d: Omit<Dorm, "id"> & { id?: string }) =>
-    setDorms((p) => (d.id ? p.map((x) => (x.id === d.id ? { ...x, ...d } as Dorm : x)) : [...p, { ...d, id: `d${Date.now()}` }]));
+  const saveDorm = async (d: Omit<Dorm, "id"> & { id?: string }) => {
+    if (d.id) {
+      const res = await apiFetch<any>(`/dorms/${d.id}`, { method: "PUT", body: JSON.stringify(d) });
+      const updated = normDorm(res?.data ?? res);
+      setDorms((p) => p.map((x) => (x.id === d.id ? updated : x)));
+    } else {
+      const res = await apiFetch<any>("/dorms", { method: "POST", body: JSON.stringify(d) });
+      const created = normDorm(res?.data ?? res);
+      setDorms((p) => [...p, created]);
+    }
+  };
 
-  const assignDuty = (tid: string, duty: string) =>
-    setTeachers((p) => p.map((t) => (t.id === tid && !t.duties.includes(duty) ? { ...t, duties: [...t.duties, duty] } : t)));
-  const removeDuty = (tid: string, duty: string) =>
-    setTeachers((p) => p.map((t) => (t.id === tid ? { ...t, duties: t.duties.filter((d) => d !== duty) } : t)));
-  const setHod = (deptId: string, tid: string | null) => setDepts((p) => p.map((d) => (d.id === deptId ? { ...d, hodId: tid } : d)));
-  const addDept = (name: string) => setDepts((p) => [...p, { id: `dp${Date.now()}`, name, hodId: null }]);
+  const assignDuty = async (tid: string, duty: string) => {
+    const target = teachers.find((t) => t.id === tid);
+    if (!target || target.duties.includes(duty)) return;
+    const nextDuties = [...target.duties, duty];
+    const res = await apiFetch<any>(`/teachers/${tid}`, { method: "PUT", body: JSON.stringify({ duties: nextDuties }) });
+    const updated = normTeacher(res?.data ?? res);
+    setTeachers((p) => p.map((t) => (t.id === tid ? updated : t)));
+  };
 
-  const saveMarks = (entries: Mark[]) =>
+  const removeDuty = async (tid: string, duty: string) => {
+    const target = teachers.find((t) => t.id === tid);
+    if (!target) return;
+    const nextDuties = target.duties.filter((d) => d !== duty);
+    const res = await apiFetch<any>(`/teachers/${tid}`, { method: "PUT", body: JSON.stringify({ duties: nextDuties }) });
+    const updated = normTeacher(res?.data ?? res);
+    setTeachers((p) => p.map((t) => (t.id === tid ? updated : t)));
+  };
+
+  const setHod = async (deptId: string, tid: string | null) => {
+    const res = await apiFetch<any>(`/departments/${deptId}`, { method: "PUT", body: JSON.stringify({ hodId: tid }) });
+    const updated = normDept(res?.data ?? res);
+    setDepts((p) => p.map((d) => (d.id === deptId ? updated : d)));
+  };
+
+  const addDept = async (name: string) => {
+    const res = await apiFetch<any>("/departments", { method: "POST", body: JSON.stringify({ name, hodId: null }) });
+    const created = normDept(res?.data ?? res);
+    setDepts((p) => [...p, created]);
+  };
+
+  const saveMarks = async (entries: Mark[]) => {
+    const res = await apiFetch<any>("/marks", { method: "POST", body: JSON.stringify({ entries }) });
+    const raw = Array.isArray(res) ? res : Array.isArray(res?.data) ? res.data : entries;
+    const saved = raw.map(normMark);
     setMarks((prev) => {
       const map = new Map(prev.map((m) => [markKey(m), m]));
-      entries.forEach((e) => map.set(markKey(e), e));
+      saved.forEach((e: Mark) => map.set(markKey(e), e));
       return [...map.values()];
     });
+  };
 
   const fin = useCallback(
     (s: Student) => {
@@ -289,21 +370,29 @@ function useSchoolStore() {
     [ledger],
   );
 
-  const recordPayment = (studentId: string, amount: number, method: string, note: string): LedgerEntry => {
-    rct.current += 1;
-    const e: LedgerEntry = {
-      id: `l${Date.now()}`, receiptNo: `RCT-${String(rct.current).padStart(4, "0")}`, studentId,
-      kind: "payment", amount, method, date: todayStr(), note,
-    };
-    setLedger((p) => [e, ...p]);
-    return e;
+  const recordPayment = async (studentId: string, amount: number, method: string, note: string): Promise<LedgerEntry> => {
+    const res = await apiFetch<any>("/ledger/payment", {
+      method: "POST",
+      body: JSON.stringify({ studentId, amount, method, note, date: todayStr() }),
+    });
+    const created = normLedger(res?.data ?? res);
+    setLedger((p) => [created, ...p]);
+    return created;
   };
-  const adjustBalance = (studentId: string, delta: number, reason: string) =>
-    setLedger((p) => [{ id: `l${Date.now()}`, receiptNo: null, studentId, kind: "adjustment", amount: delta, method: "Adjustment", date: todayStr(), note: reason }, ...p]);
+
+  const adjustBalance = async (studentId: string, delta: number, reason: string) => {
+    const res = await apiFetch<any>("/ledger/adjustment", {
+      method: "POST",
+      body: JSON.stringify({ studentId, amount: delta, note: reason, date: todayStr() }),
+    });
+    const created = normLedger(res?.data ?? res);
+    setLedger((p) => [created, ...p]);
+  };
 
   return {
-    students, dorms, teachers, depts, marks, ledger, occ, dormError, addStudent, updateStudent, deleteStudent,
-    saveDorm, assignDuty, removeDuty, setHod, addDept, saveMarks, fin, recordPayment, adjustBalance,
+    students, dorms, teachers, depts, marks, ledger, loading, refreshAll, occ, dormError,
+    addStudent, updateStudent, deleteStudent, saveDorm, assignDuty, removeDuty, setHod, addDept,
+    saveMarks, fin, recordPayment, adjustBalance,
   };
 }
 type Store = ReturnType<typeof useSchoolStore>;
@@ -480,17 +569,32 @@ function DataView<T extends { id: string }>({ rows, cols, view = "auto", actions
 
 /* ───────────────────────────── Auth: Login + ProtectedRoute ───────────────────────────── */
 
-function Login({ onLogin, dark, toggleDark }: { onLogin: (u: User) => void; dark: boolean; toggleDark: () => void }) {
+function Login({ onLogin, dark, toggleDark }: { onLogin: (u: User, token: string) => void; dark: boolean; toggleDark: () => void }) {
   const [email, setEmail] = useState("");
   const [pw, setPw] = useState("");
-  const submit = (e: React.FormEvent) => {
+  const [submitting, setSubmitting] = useState(false);
+
+  const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    // Replace with: const { token, user } = await api.post("/auth/login", { email, password })
-    const u = SEED_USERS.find((x) => x.email === email.trim().toLowerCase() && x.password === pw);
-    if (!u) return toast.error("Invalid email or password.");
-    toast.success(`Welcome, ${u.name}`);
-    onLogin(u);
+    setSubmitting(true);
+    try {
+      const res = await apiFetch<any>("/auth/login", {
+        method: "POST",
+        body: JSON.stringify({ email: email.trim().toLowerCase(), password: pw }),
+      });
+      const token = res?.token ?? res?.accessToken ?? "";
+      const rawUser = res?.user ?? res?.data?.user;
+      if (!rawUser) throw new Error("Invalid response from server.");
+      const u = normUser(rawUser);
+      toast.success(`Welcome, ${u.name}`);
+      onLogin(u, token);
+    } catch (err: any) {
+      toast.error(err?.message || "Invalid email or password.");
+    } finally {
+      setSubmitting(false);
+    }
   };
+
   return (
     <div className="flex min-h-screen items-center justify-center p-4">
       <button className={`${iconBtn} absolute right-4 top-4`} onClick={toggleDark} aria-label="Toggle theme">{dark ? <Sun size={18} /> : <Moon size={18} />}</button>
@@ -503,23 +607,16 @@ function Login({ onLogin, dark, toggleDark }: { onLogin: (u: User) => void; dark
         <form onSubmit={submit} className="space-y-4">
           <Field label="Email"><input className={inputCls} type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@ssa.edu" autoComplete="username" required /></Field>
           <Field label="Password"><input className={inputCls} type="password" value={pw} onChange={(e) => setPw(e.target.value)} placeholder="••••••••" autoComplete="current-password" required /></Field>
-          <button className={`${btnPrimary} w-full`} type="submit">Sign in</button>
+          <button className={`${btnPrimary} w-full`} type="submit" disabled={submitting}>
+            {submitting ? "Signing in…" : "Sign in"}
+          </button>
         </form>
-        <div className="mt-6 border-t border-[var(--border)] pt-4">
-          <p className="mb-2 text-center text-xs font-semibold uppercase tracking-wide text-[var(--muted)]">Demo accounts</p>
-          <div className="grid grid-cols-3 gap-2">
-            {SEED_USERS.map((u) => (
-              <button key={u.id} className={`${btnGhost} !px-2 capitalize`} onClick={() => { setEmail(u.email); setPw(u.password); }}>{u.role}</button>
-            ))}
-          </div>
-        </div>
       </Card>
     </div>
   );
 }
 
 function ProtectedRoute({ user, roles, children }: { user: User | null; roles: Role[]; children: React.ReactNode }) {
-  // With a real API this also verifies the JWT (exp / signature) before rendering.
   if (!user) return null;
   if (!roles.includes(user.role)) {
     return (
@@ -607,18 +704,26 @@ function StudentForm({ initial, onClose }: { initial?: Student; onClose: () => v
     name: initial?.name ?? "", gender: (initial?.gender ?? "M") as "M" | "F", className: initial?.className ?? CLASSES[0],
     category: (initial?.category ?? "Day Scholar") as Category, dormId: initial?.dormId ?? "", guardian: initial?.guardian ?? "", phone: initial?.phone ?? "",
   });
+  const [saving, setSaving] = useState(false);
   const availableDorms = dorms.filter((d) => d.active && (occ(d.id) < d.capacity || d.id === initial?.dormId));
   const setCategory = (category: Category) => setF((p) => ({ ...p, category, dormId: category === "Day Scholar" ? "" : p.dormId }));
-  const submit = (e: React.FormEvent) => {
+  const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!f.name.trim()) return toast.error("Student name is required.");
     const dormId = f.category === "Boarding" ? f.dormId || null : null;
     const err = dormError(f.category, dormId, initial?.id);
     if (err) return toast.error(err);
     const data = { ...f, name: f.name.trim(), dormId };
-    if (initial) { updateStudent(initial.id, data); toast.success("Student updated."); }
-    else { const s = addStudent(data); toast.success(`Registered ${s.name} — ${s.admissionNo}`); }
-    onClose();
+    setSaving(true);
+    try {
+      if (initial) { await updateStudent(initial.id, data); toast.success("Student updated."); }
+      else { const s = await addStudent(data); toast.success(`Registered ${s.name} — ${s.admissionNo}`); }
+      onClose();
+    } catch (error: any) {
+      toast.error(error?.message || "Failed to save student.");
+    } finally {
+      setSaving(false);
+    }
   };
   return (
     <form onSubmit={submit} className="space-y-4">
@@ -649,7 +754,7 @@ function StudentForm({ initial, onClose }: { initial?: Student; onClose: () => v
         <Field label="Guardian"><input className={inputCls} value={f.guardian} onChange={(e) => setF({ ...f, guardian: e.target.value })} /></Field>
         <Field label="Phone"><input className={inputCls} value={f.phone} onChange={(e) => setF({ ...f, phone: e.target.value })} inputMode="tel" /></Field>
       </div>
-      <div className="flex justify-end gap-2"><button type="button" className={btnGhost} onClick={onClose}>Cancel</button><button className={btnPrimary}><Save size={16} />{initial ? "Save changes" : "Register student"}</button></div>
+      <div className="flex justify-end gap-2"><button type="button" className={btnGhost} onClick={onClose}>Cancel</button><button className={btnPrimary} disabled={saving}><Save size={16} />{saving ? "Saving…" : initial ? "Save changes" : "Register student"}</button></div>
     </form>
   );
 }
@@ -689,7 +794,17 @@ function StudentsPage() {
         {editing !== null && <StudentForm initial={editing === "new" ? undefined : editing} onClose={() => setEditing(null)} />}
       </Modal>
       <ConfirmDialog open={!!del} title="Delete student?" message={`This permanently removes ${del?.name} (${del?.admissionNo}) along with their marks and fee records.`}
-        onCancel={() => setDel(null)} onConfirm={() => { if (del) { deleteStudent(del.id); toast.success("Student deleted."); } setDel(null); }} />
+        onCancel={() => setDel(null)} onConfirm={async () => {
+          if (del) {
+            try {
+              await deleteStudent(del.id);
+              toast.success("Student deleted.");
+            } catch (err: any) {
+              toast.error(err?.message || "Failed to delete student.");
+            }
+          }
+          setDel(null);
+        }} />
     </>
   );
 }
@@ -698,11 +813,12 @@ function DormsPage() {
   const { dorms, occ, saveDorm } = useStore();
   const [editing, setEditing] = useState<Dorm | "new" | null>(null);
   const [f, setF] = useState({ name: "", capacity: "10", active: true });
+  const [saving, setSaving] = useState(false);
   const open = (d: Dorm | "new") => {
     setF(d === "new" ? { name: "", capacity: "10", active: true } : { name: d.name, capacity: String(d.capacity), active: d.active });
     setEditing(d);
   };
-  const submit = (e: React.FormEvent) => {
+  const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     const cap = parseInt(f.capacity, 10);
     const self = editing !== "new" && editing ? editing : null;
@@ -711,14 +827,25 @@ function DormsPage() {
     if (dorms.some((d) => d.id !== self?.id && d.name.toLowerCase() === f.name.trim().toLowerCase())) return toast.error("A dormitory with that name exists.");
     if (self && cap < occ(self.id)) return toast.error(`${occ(self.id)} students live here — capacity can’t be lower.`);
     if (self && !f.active && occ(self.id) > 0) return toast.error("Move residents out before disabling this dormitory.");
-    saveDorm({ id: self?.id, name: f.name.trim(), capacity: cap, active: f.active });
-    toast.success(self ? "Dormitory updated." : "Dormitory added.");
-    setEditing(null);
+    setSaving(true);
+    try {
+      await saveDorm({ id: self?.id, name: f.name.trim(), capacity: cap, active: f.active });
+      toast.success(self ? "Dormitory updated." : "Dormitory added.");
+      setEditing(null);
+    } catch (err: any) {
+      toast.error(err?.message || "Failed to save dormitory.");
+    } finally {
+      setSaving(false);
+    }
   };
-  const toggle = (d: Dorm) => {
+  const toggle = async (d: Dorm) => {
     if (d.active && occ(d.id) > 0) return toast.error("Move residents out before disabling this dormitory.");
-    saveDorm({ ...d, active: !d.active });
-    toast.success(d.active ? `${d.name} disabled.` : `${d.name} enabled.`);
+    try {
+      await saveDorm({ ...d, active: !d.active });
+      toast.success(d.active ? `${d.name} disabled.` : `${d.name} enabled.`);
+    } catch (err: any) {
+      toast.error(err?.message || "Failed to update dormitory.");
+    }
   };
   return (
     <>
@@ -744,7 +871,7 @@ function DormsPage() {
           <Field label="Name"><input className={inputCls} value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></Field>
           <Field label="Capacity"><input className={inputCls} type="number" min={1} value={f.capacity} onChange={(e) => setF({ ...f, capacity: e.target.value })} /></Field>
           <label className="flex min-h-[44px] items-center gap-3 text-sm"><input type="checkbox" className="h-5 w-5" checked={f.active} onChange={(e) => setF({ ...f, active: e.target.checked })} />Active (available for allocation)</label>
-          <div className="flex justify-end gap-2"><button type="button" className={btnGhost} onClick={() => setEditing(null)}>Cancel</button><button className={btnPrimary}><Save size={16} />Save</button></div>
+          <div className="flex justify-end gap-2"><button type="button" className={btnGhost} onClick={() => setEditing(null)}>Cancel</button><button className={btnPrimary} disabled={saving}><Save size={16} />{saving ? "Saving…" : "Save"}</button></div>
         </form>
       </Modal>
     </>
@@ -762,13 +889,20 @@ function StaffPage() {
     { key: "d", label: "Department", render: (t) => depts.find((d) => d.id === t.deptId)?.name ?? "—" },
     { key: "s", label: "Subjects", render: (t) => t.subjects.join(", ") },
     { key: "h", label: "HoD", render: (t) => { const h = depts.filter((d) => d.hodId === t.id); return h.length ? <Badge tone="amber">HoD {h.map((d) => d.name).join(", ")}</Badge> : "—"; } },
-    { key: "du", label: "Duties", render: (t) => t.duties.length ? <div className="flex flex-wrap justify-end gap-1 md:justify-start">{t.duties.map((d) => <span key={d} className="inline-flex items-center gap-1 rounded-full bg-indigo-500/15 py-0.5 pl-2.5 pr-1 text-xs font-semibold text-indigo-500">{d}<button onClick={() => { removeDuty(t.id, d); toast.success("Duty removed."); }} aria-label={`Remove ${d}`} className="rounded-full p-0.5 hover:bg-indigo-500/20"><X size={12} /></button></span>)}</div> : <span className="text-[var(--muted)]">None</span> },
+    { key: "du", label: "Duties", render: (t) => t.duties.length ? <div className="flex flex-wrap justify-end gap-1 md:justify-start">{t.duties.map((d) => <span key={d} className="inline-flex items-center gap-1 rounded-full bg-indigo-500/15 py-0.5 pl-2.5 pr-1 text-xs font-semibold text-indigo-500">{d}<button onClick={async () => { try { await removeDuty(t.id, d); toast.success("Duty removed."); } catch (err: any) { toast.error(err?.message || "Failed to remove duty."); } }} aria-label={`Remove ${d}`} className="rounded-full p-0.5 hover:bg-indigo-500/20"><X size={12} /></button></span>)}</div> : <span className="text-[var(--muted)]">None</span> },
   ];
-  const assign = () => {
+  const assign = async () => {
     const duty = (custom.trim() || preset).trim();
     if (!target || !duty) return;
     if (target.duties.includes(duty)) return toast.error("Duty already assigned.");
-    assignDuty(target.id, duty); toast.success(`${duty} assigned to ${target.name}.`); setTarget(null); setCustom("");
+    try {
+      await assignDuty(target.id, duty);
+      toast.success(`${duty} assigned to ${target.name}.`);
+      setTarget(null);
+      setCustom("");
+    } catch (err: any) {
+      toast.error(err?.message || "Failed to assign duty.");
+    }
   };
   return (
     <>
@@ -781,7 +915,14 @@ function StaffPage() {
             <p className="font-semibold">{d.name}</p>
             <p className="mb-2 text-xs text-[var(--muted)]">{teachers.filter((t) => t.deptId === d.id).length} teacher(s)</p>
             <Field label="Head of Department">
-              <select className={inputCls} value={d.hodId ?? ""} onChange={(e) => { setHod(d.id, e.target.value || null); toast.success("HoD updated."); }}>
+              <select className={inputCls} value={d.hodId ?? ""} onChange={async (e) => {
+                try {
+                  await setHod(d.id, e.target.value || null);
+                  toast.success("HoD updated.");
+                } catch (err: any) {
+                  toast.error(err?.message || "Failed to update HoD.");
+                }
+              }}>
                 <option value="">— Unassigned —</option>
                 {teachers.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
               </select>
@@ -790,7 +931,16 @@ function StaffPage() {
         ))}
         <Card className="flex flex-col justify-center gap-2">
           <input className={inputCls} placeholder="New department name" value={newDept} onChange={(e) => setNewDept(e.target.value)} />
-          <button className={btnGhost} onClick={() => { if (!newDept.trim()) return; addDept(newDept.trim()); setNewDept(""); toast.success("Department added."); }}><Plus size={16} />Add department</button>
+          <button className={btnGhost} onClick={async () => {
+            if (!newDept.trim()) return;
+            try {
+              await addDept(newDept.trim());
+              setNewDept("");
+              toast.success("Department added.");
+            } catch (err: any) {
+              toast.error(err?.message || "Failed to add department.");
+            }
+          }}><Plus size={16} />Add department</button>
         </Card>
       </div>
       <Modal open={!!target} title={`Assign duty — ${target?.name ?? ""}`} onClose={() => setTarget(null)}>
@@ -819,6 +969,7 @@ function FinancePage() {
   const [q, setQ] = useState("");
   const [modal, setModal] = useState<"pay" | "adj" | null>(null);
   const [sid, setSid] = useState(""); const [amt, setAmt] = useState(""); const [method, setMethod] = useState("Cash"); const [note, setNote] = useState("");
+  const [saving, setSaving] = useState(false);
   const byId = useMemo(() => new Map(students.map((s) => [s.id, s])), [students]);
   const collected = sum(ledger.filter((l) => l.kind === "payment").map((l) => l.amount));
   const billed = sum(students.map((s) => fin(s).total));
@@ -826,22 +977,29 @@ function FinancePage() {
   const rows = ledger.filter((l) => (byId.get(l.studentId)?.name ?? "").toLowerCase().includes(q.toLowerCase()) || (l.receiptNo ?? "").toLowerCase().includes(q.toLowerCase()));
   const feeRows = students.filter((s) => (s.name + s.admissionNo).toLowerCase().includes(q.toLowerCase()));
   const openModal = (m: "pay" | "adj") => { setSid(students[0]?.id ?? ""); setAmt(""); setNote(""); setMethod("Cash"); setModal(m); };
-  const submit = (e: React.FormEvent) => {
+  const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     const s = byId.get(sid); const n = parseFloat(amt);
     if (!s) return toast.error("Select a student.");
     if (!Number.isFinite(n) || n === 0) return toast.error("Enter a valid amount.");
-    if (modal === "pay") {
-      if (n < 0) return toast.error("Payment must be positive.");
-      if (n > fin(s).balance) return toast.error(`Exceeds outstanding balance (${money(fin(s).balance)}).`);
-      const entry = recordPayment(s.id, n, method, note || "Fee payment");
-      toast.success(`Receipt ${entry.receiptNo} issued.`);
-      openPrintable(`Receipt ${entry.receiptNo}`, receiptHtml(entry, s, fin(s).balance - n));
-    } else {
-      if (!note.trim()) return toast.error("A reason is required for adjustments.");
-      adjustBalance(s.id, n, note.trim()); toast.success("Balance adjusted.");
+    setSaving(true);
+    try {
+      if (modal === "pay") {
+        if (n < 0) { setSaving(false); return toast.error("Payment must be positive."); }
+        if (n > fin(s).balance) { setSaving(false); return toast.error(`Exceeds outstanding balance (${money(fin(s).balance)}).`); }
+        const entry = await recordPayment(s.id, n, method, note || "Fee payment");
+        toast.success(`Receipt ${entry.receiptNo} issued.`);
+        openPrintable(`Receipt ${entry.receiptNo}`, receiptHtml(entry, s, fin(s).balance - n));
+      } else {
+        if (!note.trim()) { setSaving(false); return toast.error("A reason is required for adjustments."); }
+        await adjustBalance(s.id, n, note.trim()); toast.success("Balance adjusted.");
+      }
+      setModal(null);
+    } catch (err: any) {
+      toast.error(err?.message || "Transaction failed.");
+    } finally {
+      setSaving(false);
     }
-    setModal(null);
   };
   const ledgerCols: Col<LedgerEntry>[] = [
     { key: "date", label: "Date", primary: true, render: (l) => <div><div className="font-semibold">{byId.get(l.studentId)?.name ?? "—"}</div><div className="text-xs text-[var(--muted)]">{l.date}</div></div> },
@@ -887,7 +1045,7 @@ function FinancePage() {
           <Field label={modal === "pay" ? "Amount" : "Amount (+ increases fees, − waives/reduces)"}><input className={inputCls} type="number" step="0.01" value={amt} onChange={(e) => setAmt(e.target.value)} /></Field>
           {modal === "pay" && <Field label="Method"><select className={inputCls} value={method} onChange={(e) => setMethod(e.target.value)}><option>Cash</option><option>Bank Transfer</option><option>Mobile Money</option><option>Cheque</option></select></Field>}
           <Field label={modal === "pay" ? "Note (optional)" : "Reason (required)"}><input className={inputCls} value={note} onChange={(e) => setNote(e.target.value)} /></Field>
-          <div className="flex justify-end gap-2"><button type="button" className={btnGhost} onClick={() => setModal(null)}>Cancel</button><button className={btnPrimary}>{modal === "pay" ? "Save & print receipt" : "Apply adjustment"}</button></div>
+          <div className="flex justify-end gap-2"><button type="button" className={btnGhost} onClick={() => setModal(null)}>Cancel</button><button className={btnPrimary} disabled={saving}>{saving ? "Saving…" : modal === "pay" ? "Save & print receipt" : "Apply adjustment"}</button></div>
         </form>
       </Modal>
     </>
@@ -903,6 +1061,7 @@ function GradebookPage({ user }: { user: User }) {
   const [cls, setCls] = useState(CLASSES[0]); const [subject, setSubject] = useState(subjects[0]);
   const [term, setTerm] = useState(CURRENT_TERM); const [type, setType] = useState(ASSESSMENTS[0]);
   const [draft, setDraft] = useState<Record<string, { score: string; remark: string }>>({});
+  const [saving, setSaving] = useState(false);
   const classStudents = useMemo(() => students.filter((s) => s.className === cls), [students, cls]);
 
   useEffect(() => {
@@ -913,7 +1072,7 @@ function GradebookPage({ user }: { user: User }) {
     });
     setDraft(d);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cls, subject, term, type, classStudents.length]);
+  }, [cls, subject, term, type, classStudents.length, marks]);
 
   const setScore = (id: string, v: string) => {
     const n = parseFloat(v);
@@ -925,7 +1084,7 @@ function GradebookPage({ user }: { user: User }) {
     const all = Number.isFinite(cur) ? [...others, cur] : others;
     return { total: sum(all), avg: all.length ? mean(all) : null };
   };
-  const save = () => {
+  const save = async () => {
     const entries: Mark[] = [];
     for (const s of classStudents) {
       const d = draft[s.id]; if (!d || d.score === "") continue;
@@ -934,7 +1093,15 @@ function GradebookPage({ user }: { user: User }) {
       entries.push({ studentId: s.id, subject, term, type, score: n, remark: d.remark || remarkOf(n) });
     }
     if (!entries.length) return toast.error("Enter at least one mark.");
-    saveMarks(entries); toast.success(`${entries.length} mark(s) saved.`);
+    setSaving(true);
+    try {
+      await saveMarks(entries);
+      toast.success(`${entries.length} mark(s) saved.`);
+    } catch (err: any) {
+      toast.error(err?.message || "Failed to save marks.");
+    } finally {
+      setSaving(false);
+    }
   };
   const classMean = mean(classStudents.map((s) => parseFloat(draft[s.id]?.score ?? "")).filter((n) => Number.isFinite(n)));
   const cols: Col<Student>[] = [
@@ -947,7 +1114,7 @@ function GradebookPage({ user }: { user: User }) {
   ];
   return (
     <>
-      <PageHeader title="Marks & Gradebook" subtitle="Grades: A ≥80 · B ≥70 · C ≥60 · D ≥50 · E ≥40 · U <40" actions={<button className={btnPrimary} onClick={save}><Save size={16} />Save marks</button>} />
+      <PageHeader title="Marks & Gradebook" subtitle="Grades: A ≥80 · B ≥70 · C ≥60 · D ≥50 · E ≥40 · U <40" actions={<button className={btnPrimary} onClick={save} disabled={saving}><Save size={16} />{saving ? "Saving…" : "Save marks"}</button>} />
       <Card className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
         <Field label="Class"><select className={inputCls} value={cls} onChange={(e) => setCls(e.target.value)}>{CLASSES.map((c) => <option key={c}>{c}</option>)}</select></Field>
         <Field label="Subject"><select className={inputCls} value={subject} onChange={(e) => setSubject(e.target.value)}>{subjects.map((c) => <option key={c}>{c}</option>)}</select></Field>
@@ -1164,7 +1331,7 @@ function SystemInfoPage({ user, loginAt, go }: { user: User; loginAt: number; go
   const displayId = user.role === "student" ? students.find((s) => s.id === user.refId)?.admissionNo ?? "—"
     : user.role === "teacher" ? `TCH-${String(teachers.findIndex((t) => t.id === user.refId) + 1).padStart(3, "0")}` : "ADM-001";
   const roleTone: Tone = user.role === "admin" ? "red" : user.role === "teacher" ? "amber" : "blue";
-  const dot = api.state === "online" ? "bg-emerald-500" : api.state === "checking" ? "bg-amber-400 animate-pulse" : "bg-slate-400";
+  const dot = api.state === "online" ? "bg-emerald-500" : api.state === "checking" ? "bg-amber-400 animate-pulse" : "bg-rose-500";
   return (
     <>
       <PageHeader title="App Overview & System Info" subtitle="Everything about this platform, in one place." />
@@ -1204,7 +1371,7 @@ function SystemInfoPage({ user, loginAt, go }: { user: User; loginAt: number; go
         <div className="flex items-center gap-3">
           <Activity size={20} className="text-[var(--muted)]" />
           <div><p className="flex items-center gap-2 text-sm font-semibold"><span className={`h-2.5 w-2.5 rounded-full ${dot}`} />
-            {api.state === "online" ? `API online · ${api.ms}ms` : api.state === "checking" ? "Checking API…" : "API not connected · demo data"}</p>
+            {api.state === "online" ? `API online · ${api.ms}ms` : api.state === "checking" ? "Checking API…" : "API unreachable"}</p>
             <p className="text-xs text-[var(--muted)]">Release {VERSION} · {API_URL}</p></div>
         </div>
         <div className="flex gap-2"><button className={btnGhost} onClick={ping}><RefreshCw size={14} />Re-check</button><a className={btnPrimary} href={`mailto:${INSTITUTION.supportEmail}?subject=${encodeURIComponent(`SSA support — ${user.name}`)}`}><Mail size={16} />Contact support</a></div>
@@ -1254,12 +1421,13 @@ function renderPage(page: string, user: User, loginAt: number, go: (p: string) =
 }
 
 function Shell({ user, loginAt, dark, toggleDark, onLogout }: { user: User; loginAt: number; dark: boolean; toggleDark: () => void; onLogout: () => void }) {
+  const { loading: storeLoading } = useStore();
   const nav = NAV[user.role];
   const [page, setPage] = useState(nav[0].id);
   const [collapsed, setCollapsed] = useState(false);
   const [drawer, setDrawer] = useState(false);
   const [loading, setLoading] = useState(true);
-  useEffect(() => { setLoading(true); const t = setTimeout(() => setLoading(false), 450); return () => clearTimeout(t); }, [page]);
+  useEffect(() => { setLoading(true); const t = setTimeout(() => setLoading(false), 300); return () => clearTimeout(t); }, [page]);
   const go = (p: string) => { setPage(p); setDrawer(false); window.scrollTo({ top: 0 }); };
   const current = nav.find((n) => n.id === page);
   const bottom = nav.length <= 4 ? nav : nav.slice(0, 4);
@@ -1305,7 +1473,7 @@ function Shell({ user, loginAt, dark, toggleDark, onLogout }: { user: User; logi
           <button className={`${iconBtn} hidden md:inline-flex`} onClick={onLogout} aria-label="Sign out"><LogOut size={18} /></button>
         </header>
         <main className="mx-auto max-w-6xl px-4 pb-28 pt-5 sm:px-6 md:pb-10">
-          {loading ? <PageSkeleton /> : (
+          {loading || storeLoading ? <PageSkeleton /> : (
             <ProtectedRoute user={user} roles={PAGE_ROLES[page] ?? []}>{renderPage(page, user, loginAt, go)}</ProtectedRoute>
           )}
         </main>
@@ -1332,20 +1500,46 @@ const THEMES = {
 };
 
 export default function SchoolSystemPage() {
-  const store = useSchoolStore();
   const [user, setUser] = useState<User | null>(null);
   const [loginAt, setLoginAt] = useState(0);
   const [dark, setDark] = useState(false);
-  useEffect(() => { setDark(window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false); }, []);
+
+  useEffect(() => {
+    setDark(window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false);
+    const savedToken = getToken();
+    const savedUser = typeof window !== "undefined" ? localStorage.getItem(USER_KEY) : null;
+    if (savedToken && savedUser) {
+      try {
+        setUser(normUser(JSON.parse(savedUser)));
+        setLoginAt(Date.now());
+      } catch {
+        setAuthStorage(null, null);
+      }
+    }
+  }, []);
+
+  const store = useSchoolStore(user);
+
+  const handleLogin = (u: User, token: string) => {
+    setAuthStorage(token, u);
+    setUser(u);
+    setLoginAt(Date.now());
+  };
+
+  const handleLogout = () => {
+    setAuthStorage(null, null);
+    setUser(null);
+    toast("Signed out.");
+  };
 
   return (
     <StoreCtx.Provider value={store}>
       <div style={THEMES[dark ? "dark" : "light"] as React.CSSProperties} className="min-h-screen bg-[var(--bg)] text-[var(--text)] antialiased">
         <Toaster position="top-center" toastOptions={{ style: { background: "var(--card)", color: "var(--text)", border: "1px solid var(--border)" } }} />
         {user ? (
-          <Shell key={user.id} user={user} loginAt={loginAt} dark={dark} toggleDark={() => setDark(!dark)} onLogout={() => { setUser(null); toast("Signed out."); }} />
+          <Shell key={user.id} user={user} loginAt={loginAt} dark={dark} toggleDark={() => setDark(!dark)} onLogout={handleLogout} />
         ) : (
-          <Login dark={dark} toggleDark={() => setDark(!dark)} onLogin={(u) => { setUser(u); setLoginAt(Date.now()); }} />
+          <Login dark={dark} toggleDark={() => setDark(!dark)} onLogin={handleLogin} />
         )}
       </div>
     </StoreCtx.Provider>
